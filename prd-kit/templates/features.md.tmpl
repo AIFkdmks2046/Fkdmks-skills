@@ -1,0 +1,73 @@
+# 功能全景
+
+> 本文件是 [`../../PRD.md`](../../PRD.md) §3 文档索引指向的「功能全景」分册，覆盖 §3-§7。
+> 修改功能前先看 [`../../PRD.md`](../../PRD.md) §4 维护约定的 5 条同步义务。
+
+---
+
+## 3. 功能全景
+
+> 用 1-2 段概述本项目的功能地图。按业务域或子系统组织，每个域下列出关键能力（不带技术细节，技术细节归 `engineering.md`）。
+> 例：
+> - **认证域**：登录 / 登出 / 当前用户信息 / 角色查询
+> - **员工 / 角色域**：员工 CRUD、角色 CRUD、菜单权限分配
+> - **文档域**：公共文档分类 + 文档 CRUD、个人文档 + 个人分类 CRUD
+> - **问答域**：基于 RAG 的问题输入 / 多路检索 / 引用源展示
+
+---
+
+## 4. 数据模型
+
+> 列出关键业务实体（不是全部数据库表，是**业务概念**）+ 它们的核心字段 + 关联关系。用文字 + 表格描述，不要画 ER 图。
+> 例：
+>
+> | 实体 | 核心字段 | 关联 |
+> |---|---|---|
+> | 用户（Employee） | id, username, password_hash, real_name, status | 1:N 角色 |
+> | 角色（Role） | id, name, description | N:M 菜单 |
+> | 菜单（Menu） | id, code, name, parent_id | 树形 |
+> | 公共分类（Category） | id, name, parent_id | 1:N 文档 |
+> | 公共文档（Document） | id, category_id, title, file_path, vector_status | 被 Qdrant 索引 |
+> | 个人文档（PersonalDocument） | id, user_id, category_id, title, file_path, vector_status | 仅本人可见 |
+> | 聊天历史（ChatHistory） | id, user_id, question, answer, sources, created_at | 仅本人可见 |
+
+---
+
+## 5. 关键流程
+
+> 选 2-4 个核心业务流程（如登录、问答、上传文档、权限校验），按「步骤 + 关键判断点」描述。每个流程不要超过 30 行——超长流程归 `engineering.md §17` 源码入口或单独的 runbook。
+>
+> 例（问答流程）：
+>
+> ```
+> 用户提问 → POST /api/chat/ask
+>   → ChatServiceImpl 编排：
+>     1. 拉用户可访问的公共分类（受 doc 域分类权限约束）
+>     2. 并行检索 Qdrant 公共 collection 与个人 collection
+>     3. 合并排序、过滤相似度 < 0.65、Top 5
+>     4. 取最近 5 轮对话拼上下文 → 调 OpenAI 兼容接口
+>     5. 把问题 / 回答 / 引用源写入 MySQL
+>   → 前端拿到 ChatAnswerVO（含 sources），用 SourceCard 展示引用
+> ```
+
+---
+
+## 6. 非功能约束
+
+> 列性能 / 安全 / 可用性 / 合规等非业务需求。例：
+> - **性能**：问答 P95 < 3s（不含 Embedding）
+> - **安全**：JWT 24h 过期；admin 默认密码首次登录后必须改
+> - **可用性**：Qdrant 不可用时降级为关键词检索（待办）
+> - **合规**：API key / 数据库密码不入库，运行时通过 ENV / 本地 yml 注入
+
+---
+
+## 7. 已知约束 / 待办
+
+> 「将来要做」的非需求统一登记在此。已实现的从本节删除并写入 changelog §8。
+>
+> 例：
+>
+> - [ ] Qdrant 不可用时降级为 MySQL 全文检索
+> - [ ] 文档支持在线预览（PDF / Office）
+> - [ ] 多轮对话上下文中加入用户角色信息
