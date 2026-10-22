@@ -173,3 +173,51 @@ test("status reports expired lease with --now", () => {
   assert.equal(status.output.valid, false);
   assert.match(status.output.reason, /expired/);
 });
+
+test("acquire uses a stage-aware default TTL", () => {
+  const root = makeRoot();
+  const e2e = run(root, ["acquire", ...base, "--kind", "manual", ...ownerArgs, "--stage", "6-e2e"]);
+  assert.equal(e2e.status, 0, JSON.stringify(e2e.output));
+  assert.equal(e2e.output.owner.ttl_seconds, 7200);
+
+  run(root, ["release", ...base, ...ownerArgs]);
+  const review = run(root, [
+    "acquire",
+    ...base,
+    "--kind",
+    "manual",
+    "--session",
+    "sess-2",
+    "--run-id",
+    "run-2",
+    "--stage",
+    "5-testcase-review",
+  ]);
+  assert.equal(review.status, 0, JSON.stringify(review.output));
+  assert.equal(review.output.owner.ttl_seconds, 1800);
+});
+
+test("explicit --ttl overrides the stage default", () => {
+  const root = makeRoot();
+  const acquired = run(root, [
+    "acquire",
+    ...base,
+    "--kind",
+    "manual",
+    ...ownerArgs,
+    "--stage",
+    "6-e2e",
+    "--ttl",
+    "60",
+  ]);
+  assert.equal(acquired.status, 0, JSON.stringify(acquired.output));
+  assert.equal(acquired.output.owner.ttl_seconds, 60);
+});
+
+test("renew adopts the stage default when --ttl is omitted", () => {
+  const root = makeRoot();
+  run(root, ["acquire", ...base, "--kind", "manual", ...ownerArgs]);
+  const renewed = run(root, ["renew", ...base, ...ownerArgs, "--stage", "7-fix"]);
+  assert.equal(renewed.status, 0, JSON.stringify(renewed.output));
+  assert.equal(renewed.output.owner.ttl_seconds, 3600);
+});

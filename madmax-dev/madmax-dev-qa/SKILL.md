@@ -92,15 +92,17 @@ node <技能目录>/scripts/qa-state.mjs list --root <项目根> --session <Qode
    node <技能目录>/scripts/qa-state.mjs doctor --state <状态文件>
    ```
 
-   退出码 1 = 有 blocking errors（缺 `executor` / `progress`、残留 `active_lock`、登记产物磁盘不存在、当前阶段缺产物等）。先修状态，不要带病推进。
+   退出码 1 = 有 blocking errors（缺 `executor` / `progress`、残留 `active_lock`、登记产物磁盘不存在、当前阶段缺产物、用例审查不收敛 / 超过 5 轮等）。先修状态，不要带病推进。
 3. 拿租约：
 
    ```bash
    node <技能目录>/scripts/qa-lease.mjs acquire \
      --slug <slug> --kind manual \
      --session <Qoder 会话 ID> --run-id <本次执行 ID> \
-     --ttl 900 --stage <stage> --task <n> --step <n>
+     --stage <stage> --task <n> --step <n>
    ```
+
+   TTL 未显式给时按 stage 取默认：`6-e2e` 7200s、`7-fix` 3600s、审查阶段 1800s，其余 900s；长任务可显式加 `--ttl`。
 
    退出码 2 = 有别的执行者持有有效租约：人工会话告知用户并停止；看护记日志并退出。
 4. 把当前会话写回状态文件（写操作，必须在租约内）：
@@ -111,7 +113,10 @@ node <技能目录>/scripts/qa-state.mjs list --root <项目根> --session <Qode
      [--feature-id <稳定 ID>]
    ```
 
-5. 抢到租约并 bind 后重新 Read 一次状态文件（防止读到的状态已被别人改过）；顺手调用 `madmax-dev-clean` 的自动模式清理过期历史（失败只记日志，不阻断主流程）。
+5. 抢到租约并 bind 后重新 Read 一次状态文件（防止读到的状态已被别人改过）；顺手调用 `madmax-dev-clean` 的自动模式清理过期历史（失败只记日志，不阻断主流程）。同时做一次**看护体检**：
+   - `qoder_cron action=list`，核对状态文件 `watchdog_cron_id` 是否存在；id 是死引用就清掉并告知用户“看护当前未运行”。
+   - 存在则核对 cron prompt 的 `watchdog_protocol` 与状态一致；不一致用 `action=update` 换当前模板（启停/删除仍归用户）。
+   - 需要重建时从 `references/watchdog-prompt-template.md` 填充，不要复制旧 prompt。
 6. 开始工作；每完成一个 Step：
 
    ```bash
@@ -150,7 +155,7 @@ node <技能目录>/scripts/qa-state.mjs list --root <项目根> --session <Qode
 | `3-dev` | spawn 子 Agent 执行（Read executing-plans / subagent-driven-development / TDD 的 SKILL.md）；每个 Task 先 commit 再记 `progress` | 代码 + 自测 + `progress.last_commit` | — |
 | `3.5-code-review` | spawn 审查子 Agent（Read requesting-code-review 的 SKILL.md） | `code-review.md` | — |
 | `4-testcase` | spawn 子 Agent（Read madmax-dev-cases/SKILL.md） | `test-cases.md` | — |
-| `5-testcase-review` | spawn 审查子 Agent（Read madmax-dev-review/SKILL.md）；结论必须是 PASS | `test-review-r<N>.md` | — |
+| `5-testcase-review` | spawn 审查子 Agent（Read madmax-dev-review/SKILL.md）；r1 冻结基线、r2+ 只增量复审；结论 `PASS` = 无未闭合 `BLOCK` 或用户签字豁免（见收敛协议） | `test-review-r<N>.md` | — |
 | `6-e2e` | spawn 子 Agent（Read madmax-dev-e2e/SKILL.md）；每条红用例必须映射到 issue 或 `flaky.md` | `test-report-r<N>.md`、`issues.md`、`flaky.md`（如有）、`evidence/` | — |
 | `7-fix` | **只修 `issues.md` 里 open 的应用缺陷**（每个 open 问题 spawn 修复子 Agent，Read systematic-debugging/SKILL.md）；修完 spawn e2e 子 Agent 做回归 | `test-report-r<N+1>.md`、`issues.md` 状态更新 | — |
 | `7.5-final-review` | spawn 复核子 Agent，按放行清单判定 | `final-review.md` | — |
@@ -159,7 +164,11 @@ node <技能目录>/scripts/qa-state.mjs list --root <项目根> --session <Qode
 
 **每个 stage 收尾**：`qa-state doctor --state <状态文件>` 必须 errors=0（进 stage 8 前 `--strict`）；失败先修状态，不带病推进。
 
-**回归范围（不要全量重跑）**：回归只重跑**曾有问题的用例**，再按修复改动的涉及面**抽样几个受影响区域**的相关用例补测；报告轮次递增（`test-report-r<N+1>.md`），不覆盖历史。
+**回归范围（不要全量重跑）**：
+
+- 首轮（r1）与最终验收可全量；**r1 之后任何全量运行都必须先得到用户明确批准**，并在报告里写明理由。
+- 修复轮默认只跑「曾有问题的用例 + 受影响区域抽样」；命令用 `--last-failed` / `--grep "<TC-ID>"` / `--max-failures=5`，单用例超时不超过 90s。
+- 报告必须写 `模式：full|regression`、实际命令、重跑用例 ID、耗时；轮次递增（`test-report-r<N+1>.md`），不覆盖历史。
 
 **所有 stage 通用**：开工前 `qa-state list` 路由 + `qa-lease acquire` + `qa-state bind`；每完成一个 Task/Step 更新 `progress` 并 `renew`；收尾跑 `qa-state doctor`；到关口或流程结束 `release`。阶段产物缺失才重做，未来 `planned` 缺失不重做。
 
@@ -183,7 +192,7 @@ slug: 待办清单
 feature_id: todo-list      # 稳定 ID，只允许 [A-Za-z0-9._-]；报告/issue 用它归属
 watchdog_protocol: 2
 stage: 3-dev
-awaiting_user: none        # design_review | plan_review | final_acceptance | acceptance_blocked | none
+awaiting_user: none        # design_review | plan_review | final_acceptance | acceptance_blocked | review_blocked | none
 executor:
   kind: manual             # manual | watchdog
   session_id: "de918e7c-..."  # 原 Qoder 会话 ID；看护靠它找回原会话
@@ -200,6 +209,9 @@ artifacts:
   planned: [testcases, issues, reports, review]
 issues: { total: 3, open: 1, closed: 2 }
 review_round: 1
+review_baseline: test-review-r1.md
+review_open_blocks: 0
+review_prev_open_blocks: 0
 fix_round: 1
 watchdog_cron_id: "d473c957-..."
 skipped: []
@@ -219,6 +231,7 @@ updated: "2026-10-21 23:40"
 - `active_lock` 是旧协议遗留，已废弃；遇到就 `qa-state migrate`，不要再写、不要再读。
 - `feature_id` 创建后不改；改名只改 `slug`。
 - `issues` 的 total/open/closed 必须与 `issues.md` 表格实算一致；`doctor` 会核对。
+- `review_round` / `review_baseline` / `review_open_blocks` / `review_prev_open_blocks` 每轮审查后更新；`doctor` 用它们判断是否收敛（open 必须严格下降）、是否超过 5 轮硬上限、基线文件是否存在。
 - 只有租约持有者能写本文件；`qa-state migrate` / `bind` 会检查租约并自动 `revision + 1`、写 `updated_by` / `updated`，用临时文件 + rename 原子替换。手写状态文件时也必须遵守。
 - `executor.session_id` 必须是真实 Qoder 会话 ID，且**必填**。人工会话开始时用 `qa-state list --session` 路由，再用 `qa-state bind` 写入；没有它，看护无法“唤醒原会话”。
 - 每完成一个 Task/Step 就更新 `progress` 并 `qa-lease renew`；不要等到阶段结束才写。
@@ -232,6 +245,8 @@ updated: "2026-10-21 23:40"
 ```
 你是<角色>。第一步：Read <绝对路径>/SKILL.md，严格按其内容执行。
 上下文：PRD=<路径>，设计文档=<路径>，上轮产物=<路径>，输出=<路径>。
+读取范围：只读任务相关章节；先读覆盖检查表/上轮审查意见；不要全文读 PRD/设计/计划。
+输出纪律：引用用 `文件:行`，不贴大段代码/PRD 原文；预计 >10K 字符时先写 <4KB 骨架，再用 Edit 分段追加。
 ```
 
 角色 skill 路径（`<技能目录>` 的父目录即技能根，子技能与它同级）：
@@ -240,7 +255,10 @@ updated: "2026-10-21 23:40"
 - 端到端测试 `<技能目录>/../madmax-dev-e2e/SKILL.md`
 - 开发阶段读 superpowers 插件目录下的 `executing-plans` / `subagent-driven-development` / `test-driven-development` / `requesting-code-review` / `receiving-code-review` / `systematic-debugging` / `verification-before-completion` 的 SKILL.md
 
-**打回即重开**：审查不通过时**重新 spawn** 子 Agent，并把上轮审查意见作为输入；不要指望原 Agent 记住上下文。
+**打回即重开，但输入最小化**：审查不通过时重新 spawn 子 Agent，不要把整份 PRD/设计再灌一遍：
+- 用例/代码重写：只给上轮 `BLOCK` 问题 + 受影响的用例/文件；未点名内容保持稳定，不整份重写。
+- r2+ 复审：只给上轮审查报告 + 本轮 diff/变更用例 ID + 覆盖检查表；增量复审，不重审未变内容。
+- 子 Agent 报告落盘前，主 Agent 先确认输出路径；超过 10K 字符的写入必须分段，避免单次大 Write 触发权限拦截。
 
 ## 用例缺陷回流（e2e 阶段发现用例本身写错时）
 
@@ -249,13 +267,73 @@ e2e 报告末尾若有"待修订用例"（应用行为符合 PRD，只是用例�
 1. 这些用例**不进 `issues.md`**，不算应用缺陷、不进修复循环；
 2. 把"待修订用例"清单交回 madmax-dev-cases 子 Agent 修订（**重新 spawn**，附冲突点与依据）；
 3. 修订后用例文件版本 +1，**重新过一遍用例审查**（stage 5），再重跑受影响用例（stage 6 增量轮次）；
-4. 修订轮次 ≤3；超限则按护栏跳过 + 写待办。
+4. 修订同样受收敛协议约束：只改冲突点相关用例；不收敛就停下裁决，不得直接跳过。
 
-## 护栏与不中断原则
+## 用例审查收敛协议（stage 5）
 
-- 用例审查 / 代码审查打回 ≤3 轮；单问题修复 ≤3 次
-- 达到上限**不停止整个流程**：跳过该问题，标 `skipped`，**继续完成剩余所有阶段**
-- 完成不了的部分走"人工待办闭环"（见下），不要为了一个卡点把整个任务挂起
+**轮数不是预算，收敛才是。** 停止条件不是“到 3 轮”，而是“没有未闭合 BLOCK”或“已证明不收敛”。
+
+### 分级与结论
+
+- `BLOCK`：覆盖缺口、步骤不可执行、预期不可判定、结构不合规。必须闭合才算 `PASS`。
+- `WARN`：建议、边界增强、措辞优化。不阻断，记入报告即可。
+- `PASS` = 无未闭合 `BLOCK`。
+
+### r1：冻结审查基线
+
+r1 全量审，产出三样东西，作为后续唯一审查基线：
+
+1. 审查清单（五条标准 + 结构合规，逐条给判定）；
+2. 需求→用例覆盖矩阵（每个 PRD 需求点 → 用例 ID / 未覆盖原因）；
+3. 带稳定编号的 `BLOCK` 列表（B-01、B-02…），每条含用例 ID、位置、可执行改法。
+
+基线写进 `test-review-r1.md`，状态文件记 `review_baseline: test-review-r1.md`。
+
+### r2+：只做增量复审
+
+- 只核对三件事：上轮 `BLOCK` 是否逐条闭合、本轮变更内容是否引入新 `BLOCK`、覆盖矩阵是否仍完整。
+- **未变内容不重审；在未变内容里新发现的问题一律记 `WARN`**，不得记 `BLOCK`。这是范围漂移，不是新缺陷。
+- 用例设计子 Agent 只改被点名的用例与覆盖表，不整份重写；未点名用例保持稳定。
+
+### 收敛判据（每轮必须成立）
+
+每轮结束更新状态文件：
+
+```yaml
+review_round: 2
+review_baseline: test-review-r1.md
+review_open_blocks: 1        # 本轮结束时仍未闭合的 BLOCK 数
+review_prev_open_blocks: 3   # 上一轮结束时的 BLOCK 数
+```
+
+数值抄自审查报告的 `review-meta`，不要自己估；每轮审查结束后先写状态，再跑 `doctor`。
+
+- 收敛：`review_open_blocks` 严格小于 `review_prev_open_blocks`，且本轮未在未改内容里新增 `BLOCK`。
+- 不收敛：当轮立即停止，不进入下一轮；`doctor` 会报 `review_not_converging`。
+- `review_open_blocks: 0` 即 `PASS`，不再审。
+
+### 停止后的分因路由
+
+r3 是检查点，r5 是硬上限。到检查点仍有 `BLOCK`，先判断原因，再决定动作：
+
+| 原因 | 判断依据 | 动作 |
+|---|---|---|
+| 小修可闭合 | 剩余 BLOCK 集中在少数用例，改法明确，不引入新范围 | 允许一次定向 r4：只修点名项，附闭合清单，只复审这些项 |
+| PRD 歧义 | 作者与审查者对预期行为理解不同，PRD 无明确答案 | 停下，交用户做产品决策：澄清需求后修 / 签字豁免 / 砍掉该需求 |
+| 审查越界或误判 | 新 BLOCK 落在未改内容，或引用了基线外的标准 | 按冻结基线裁决，降为 `WARN`，不加轮 |
+| 反复修不动 / 到 r5 | 同类 BLOCK 跨轮重复，或已到硬上限 | 停下，写裁决包：修 / 豁免 / 放弃 |
+
+### 停下的落地动作
+
+1. 状态文件写 `awaiting_user: review_blocked`，保留 `stage: 5-testcase-review`；
+2. 写 `.qoder/qa/pending/<slug>-review-blocked-<YYYYMMDD-HHmm>.md`：剩余 BLOCK 清单、每条影响与修复成本、带病放行风险、可选方案；
+3. `release` 租约并停止推进；此时 `doctor` 报 blocking 是预期的；
+4. 用户签字豁免：状态文件记 `gates_skipped: [testcase_review]` 与 `gates.testcase_review: "用户签字豁免：<原因>"`，`doctor` 把审查类 blocking 降为 warning；
+5. 用户选择修：只做定向轮次；选择放弃：`qa-state close --stage aborted`。
+
+**红线**：不得把 FAIL 的用例审查直接标 `skipped` 继续；不得无豁免记录进入 stage 6；不得在 r2+ 用新标准扩大审查范围。
+
+代码审查（stage 3.5）同样收敛：P1/P2 进 `issues.md` 跟踪；单问题修复 ≤3 次，超限停下裁决，不自动跳过。
 
 ## 人工待办闭环
 
@@ -281,6 +359,7 @@ node <技能目录>/scripts/qa-state.mjs close --slug <slug> --session <id> --ru
 - 子技能可手动触发：用户说“清理工作流历史 / 清理 qa 历史 / 归档已完成功能”时直接调用 `madmax-dev-clean`，默认先预览、确认后再执行。
 - `close` 只改状态（`stage` / `awaiting_user: none` / `closed_at` / `closed_reason`），不动文件；输出里有 `watchdog_cron_id` 时先 `qoder_cron action=remove`。
 - 会话结束但功能**没完成**：不要 `close`，也不要归档；保留状态文件与租约 TTL，等新会话按 `list --root` + `bind` 接手。
+- **一个功能一个会话**：功能验收/中止后，建议新开会话做下一个功能；用 `qa-state list --root` + `bind` 交接。不要把多个长功能塞进同一会话——上下文压缩会丢细节，进度只认状态文件。
 
 ## 看护（Watchdog）v2：supervisor，不是执行者
 
@@ -302,6 +381,7 @@ node <技能目录>/scripts/qa-state.mjs close --slug <slug> --session <id> --ru
 |---|---|---|
 | `done` / `aborted` | 任意 | `REMOVE`，撤销 cron |
 | 任意 stage 的 `awaiting_user: acceptance_blocked` | 任意 | `PENDING`（不再静默跳过） |
+| 任意 stage 的 `awaiting_user: review_blocked` | 任意 | `PENDING`（用例审查不收敛，等用户裁决） |
 | `8-acceptance` + `final_acceptance` | 任意 | `REMOVE` + 通知验收 |
 | `awaiting_user` 非空（非 blocked） | 任意 | `SKIP`，等人 |
 | 进行中 | `running` / `needs_attention` | `SKIP` |
@@ -327,7 +407,7 @@ node <技能目录>/scripts/watchdog-preflight.mjs \
 
 退出码：`0` = `NUDGE` / `EXECUTE_FALLBACK`，`2` = `SKIP` / `LOG_ONLY`，`3` = `REMOVE`，`4` = `PENDING`，`5` = `DISABLE`。脚本输出 JSON，含 `action`、`reason`、`fingerprint`（PENDING 时）；日志里原样记下。
 
-预检现在会：用**全阶段产物矩阵**校验（3.5→`code-review.md`、4→`test-cases.md`、5→`test-review-r*.md`、6→`test-report-r*.md`+`issues.md`、7.5→`final-review.md`、8→`acceptance-summary.md`）；缺 `progress` 不 NUDGE；任意 stage 的 `acceptance_blocked` 都报；残留 `active_lock` 直接 PENDING 并提示 `qa-state migrate`；同因待办 24h 内去重，连续 3 次自动 `DISABLE`。
+预检现在会：用**全阶段产物矩阵**校验（3.5→`code-review.md`、4→`test-cases.md`、5→`test-review-r*.md`、6→`test-report-r*.md`+`issues.md`、7.5→`final-review.md`、8→`acceptance-summary.md`）；缺 `progress` 不 NUDGE；任意 stage 的 `acceptance_blocked` / `review_blocked` 都报；残留 `active_lock` 直接 PENDING 并提示 `qa-state migrate`；`doctor` 的 `review_not_converging` / `review_round_exceeded` 也会 PENDING（不允许带病 NUDGE）；同因待办 24h 内去重，连续 3 次自动 `DISABLE`。
 
 ### 看护执行流程
 
@@ -347,7 +427,7 @@ node <技能目录>/scripts/watchdog-preflight.mjs \
    - `qa-lease acquire --kind watchdog --session watchdog-<runId> --run-id <runId> --ttl 300`；退出码 2 → 记日志退出。
    - **再查一次**原会话；若已变成 `running` / `needs_attention` → release，记日志，退出。
    - 目标 `run_id` = `executor.run_id`（预检保证非空；为空说明状态未 bind，预检会 PENDING，不会走到这里）。
-   - **先 handoff**：`qa-lease handoff --from-session watchdog-<runId> --from-run-id <runId> --to-session <target> --to-run-id <目标 run_id> --to-kind manual --ttl 900`，再发消息（避免目标续租时租约还没交接）。
+   - **先 handoff**：`qa-lease handoff --from-session watchdog-<runId> --from-run-id <runId> --to-session <target> --to-run-id <目标 run_id> --to-kind manual --ttl 3600`，再发消息（避免目标续租时租约还没交接；3600 是为了让被唤醒的会话撑过一轮长子 Agent）。
    - `send_message_to_chat_session(target, prompt)`，prompt 必须包含：
      - 先读状态文件和 `progress`；
      - 当前 `stage` / `current_task` / `current_step` / `completed_tasks`；
@@ -404,6 +484,7 @@ node <技能目录>/scripts/qa-state.mjs doctor --state <状态文件>
 - 抢租约必须用 `qa-lease.mjs acquire`（`mkdir` 原子创建 + 过期重命名），不要手写 `active_lock`，不要 `rm -rf` 不认识的锁目录。
 - 人工会话不拿租约 = 看护无法知道你正在跑。每次开始工作、每个 Step、每个阶段都要 `renew`；到关口/结束才 `release`。
 - 多功能的看护也遵守同一把锁：A 功能持锁时，B 功能的看护 `SKIP`，不是“另一功能才跳过”。
+- **长任务前扩 TTL**：spawn 审查 / 端到端 / 全量回归子 Agent 前，先 `qa-lease renew --ttl <预计时长+600>`（E2E 与全量回归 ≥3600，审查 ≥1800），结束后调回 900。900s 撑不过一轮长子 Agent，中途过期会被别的执行者抢走。
 - `.qoder/qa/.active-lease/` 加入项目 `.gitignore`；租约、watchdog-log、`history/` 都不入库。
 - `qa-state migrate` / `bind` 在脚本内校验租约；没有有效租约直接退出码 2。`list` / `doctor` 只读，不需要租约。
 
@@ -443,7 +524,7 @@ node <技能目录>/scripts/qa-state.mjs doctor --state <状态文件>
 先定义“干净环境”，否则“倾向 flaky”不是结论：
 
 1. 单进程、无并发、DB 可重置；记录 `resetSeed` 耗时。
-2. `resetSeed > 120s` 或 health check 失败 → 判环境不可测，**不出结论**，写 pending。
+2. `resetSeed > 15s` 记警告并在报告写明；`> 60s` 或 health check 失败 → 判环境不可测，**不出结论**，写 pending。
 3. 同一 commit 连续 2 次独立运行都红 → 判缺陷，进 `issues.md`。
 4. 绿↔红翻转（同 commit）→ 判 flaky，写 `flaky.md`，隔离该用例。
 5. flaky 不计入 P0/P1 清零；放行必须用户签字，并在验收通知里列出。
@@ -472,6 +553,10 @@ node <技能目录>/scripts/qa-state.mjs doctor --state <状态文件>
 | 产物散落在项目根（DESIGN.md/TESTS.md/PLAN.md） | 全部进 `.qoder/qa/<slug>/` |
 | 不写状态文件，任务一停就断线 | 阶段完成立刻重写状态文件 |
 | 跳过代码审查与用例审查直接测 | 3.5 与 5 是必过环节 |
+| 用例审查 r2+ 重审未改内容，把范围外新发现记 BLOCK | 只做增量复审；未改内容的新发现记 `WARN` |
+| 到 3 轮机械跳过，或无限重跑 | 收敛判据：open BLOCK 必须严格下降；3 轮检查点、5 轮硬上限，按原因路由 |
+| 打回后整份重写用例 | 只改点名用例与覆盖表，未点名内容保持稳定 |
+| 把 FAIL 的用例审查标 skipped 进 e2e | 红线；只能由用户签字豁免并写进状态文件 |
 | 问题不分级、不建 issues.md，只在报告里"缺陷记录" | 分级 + 独立 `issues.md` |
 | 自己判"全部通过，可验收"就结束 | 须经 7.5 复核 + 关口③ |
 | 报告覆盖写，重跑丢历史 | `test-report-r<N>.md` 轮次命名 |
@@ -499,7 +584,9 @@ node <技能目录>/scripts/qa-state.mjs doctor --state <状态文件>
 
 - 打算"先做下去，最后一起给用户看" → 关口就在这里
 - 产物写到了项目根而不是 `.qoder/qa/<slug>/`
-- 一个问题修不好就打算停掉整个流程 → 应该跳过 + 写待办 + 继续
+- 用例审查不收敛就想“再跑一轮”或“直接跳过” → 先看 open BLOCK 是否下降，再按原因路由
+- 打算在 r2+ 重审未改内容 → 只做增量复审，范围外新发现记 `WARN`
+- 打算把 FAIL 的用例审查标 `skipped` 继续 → 红线，只能用户签字豁免
 - 打算自己说"可以验收了" → 7.5 复核 + 用户确认
 - 状态文件没更新就以为"进度还在"
 - 没拿租约就开工，或觉得“我是人工会话所以不用租约”

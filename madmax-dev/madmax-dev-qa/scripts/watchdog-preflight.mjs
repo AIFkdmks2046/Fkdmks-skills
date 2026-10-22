@@ -14,10 +14,9 @@ const PROTOCOL = 2;
 const DEFAULT_TTL = 900;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// 这些错误由 doctor 负责；看护不因它们停下（executor 缺失走 EXECUTE_FALLBACK，审查 FAIL 应继续打回重开）
+// 这些错误由 doctor 负责；看护不因它们停下（executor 缺失走 EXECUTE_FALLBACK）
 const PREFLIGHT_IGNORE = new Set([
   "executor_missing",
-  "test_review_failed",
   "issues_count_mismatch",
   "p01_open_at_acceptance",
 ]);
@@ -270,6 +269,17 @@ function decide(flags) {
     return pendingDecision(
       `watchdog_protocol mismatch: expected ${PROTOCOL}, got ${Number.isFinite(protocol) ? protocol : "missing"}`,
       fingerprintOf("protocol-mismatch", String(protocol)),
+      base,
+      now,
+      pendingDir,
+      slug,
+    );
+  }
+
+  if (awaiting === "review_blocked") {
+    return pendingDecision(
+      `use-case review is blocked at ${stage}; human arbitration required`,
+      fingerprintOf("review-blocked", stage),
       base,
       now,
       pendingDir,

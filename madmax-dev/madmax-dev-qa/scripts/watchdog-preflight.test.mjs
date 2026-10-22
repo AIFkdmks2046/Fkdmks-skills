@@ -287,6 +287,16 @@ test("acceptance_blocked before stage 8 -> PENDING", () => {
   assert.match(result.output.reason, /blocked/);
 });
 
+test("review_blocked at any stage -> PENDING (human arbitration)", () => {
+  const project = makeProject({
+    state: { stage: "5-testcase-review", awaiting_user: "review_blocked" },
+  });
+  const result = runPreflight(project, ["--session-status", "idle", "--any-running", "false"]);
+  assertDecision(result, "PENDING", 4);
+  assert.match(result.output.reason, /review is blocked/);
+  assert.match(result.output.fingerprint, /^review-blocked-/);
+});
+
 function writePending(root, fingerprint, index) {
   const dir = path.join(root, ".qoder", "qa", "pending");
   fs.mkdirSync(dir, { recursive: true });

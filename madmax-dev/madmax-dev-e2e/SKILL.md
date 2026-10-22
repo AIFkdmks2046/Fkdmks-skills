@@ -32,10 +32,17 @@ description: 【Mad Max · 交付】Use when a feature's test cases are ready an
 3. **启动**：由本角色启动服务，记录端口与进程/PID。
 4. **收尾**：**测试结束必须关闭自己启动的服务并释放端口**（避免下次跑被占用）。
 5. **失败处理**：服务起不来或测试数据准备不了 → 相关用例标 `blocked`，走"跳过 + 写待办"，**不阻塞其他用例**，也不擅自把整套测试判为失败。
+6. **环境预检**：先跑一次数据重置/健康检查，记录 `resetSeed` 耗时。`>15s` 在报告里标警告；`>60s` 或 health check 失败 → 环境不可测，**不出测试结论**，写 pending。
 
 ## 二、用浏览器实际执行
 
 用 Qoder 内置浏览器（browser-use MCP：`navigate_page` / `take_snapshot` / `click` / `fill` / `press_key` / `take_screenshot` / `list_console_messages` / `list_network_requests`）按用例逐步操作。
+
+**执行方式（优先自动化）**：
+
+- 项目已有 Playwright / Cypress / 测试脚本时，优先用现成脚本跑；browser-use 只用于脚本覆盖不到或需要探索的场景。
+- 长套件放后台执行（`run_in_background`），用进程状态或报告文件判断是否结束；**不要用 `sleep` 轮询**，也不要一个用例一个 `sleep`。
+- 单用例超时 ≤90s，`--max-failures=5` 止损；失败用例先记证据再继续，不因一个用例卡死整轮。
 
 **已知坑（实测踩过，先查这里再排查业务代码）**：
 
@@ -69,8 +76,12 @@ description: 【Mad Max · 交付】Use when a feature's test cases are ready an
 
 ```markdown
 # 测试报告：<功能名> 第 N 轮
-- 模式：full | regression（regression 需列出本轮重跑用例 ID 与抽样补测范围）
-- 环境：URL / 启动命令 / 端口 / 执行时间 / 浏览器
+- 模式：full | regression
+- 命令：实际执行的命令（含 `--last-failed` / `--grep` / `--max-failures` 等）
+- 范围：full，或本轮重跑用例 ID + 抽样受影响区域
+- 环境：URL / 启动命令 / 端口 / 浏览器 / `resetSeed` 耗时
+- 耗时：总耗时 / 单用例超时设置
+- 时间：开始-结束
 ## 汇总
 | 总用例 | 通过 | 失败 | 阻塞 | 跳过 |
 |---|---|---|---|---|
@@ -110,7 +121,15 @@ FAIL（1 个 P1 未修复，见 issues.md）
 
 ## 六、回归模式
 
-回归（regression）时：**只重跑曾有问题的用例**，再按修复改动的涉及面**抽样几个受影响区域**的相关用例补测；不要求全量重跑；输出 `test-report-r<N+1>.md`，不覆盖上一轮。
+**首轮（r1）与最终验收可全量；r1 之后任何全量运行都必须先得到用户明确批准**，并在报告里写明理由。
+
+回归默认只跑：
+
+- 上一轮失败/阻塞过的用例（`--last-failed` 或 `--grep "<TC-ID>"`）；
+- 修复改动涉及的受影响区域抽样；
+- 不重跑未受影响的通过用例。
+
+命令必须带 `--max-failures=5`，单用例超时 ≤90s；报告写实际命令、重跑用例 ID、耗时；输出 `test-report-r<N+1>.md`，不覆盖上一轮。
 
 ## 七、安全红线
 
@@ -130,6 +149,10 @@ FAIL（1 个 P1 未修复，见 issues.md）
 | 遇到一个卡死用例就整轮停摆 | 该用例标 blocked，其余继续 |
 | 小程序原生功能假装测过 | 列入 manual-checklist 交人工 |
 | 把"用例写法与应用既定设计冲突"当成应用缺陷开 issue | 先做失败分流：应用不违反 PRD 就不是应用缺陷，走"待修订用例"回退给设计者 |
+| 每轮都全量重跑 | 首轮/最终验收才全量；回归只跑失败用例 + 受影响抽样，全量需用户批准 |
+| 用 `sleep` 等测试跑完 | 后台执行，查进程/报告文件；不要 sleep 轮询 |
+| 报告只写"通过/失败"，不写命令与范围 | 写模式、命令、重跑用例 ID、耗时、`resetSeed` |
+| `resetSeed` 很慢还继续下结论 | `>15s` 警告，`>60s` 判环境不可测，写 pending |
 
 ## Red Flags — 停下来自检
 
@@ -138,3 +161,6 @@ FAIL（1 个 P1 未修复，见 issues.md）
 - 报告里结论是"通过"但 issues.md 还有 open 的 P0/P1？→ 结论写 FAIL
 - 服务还开着没关？→ 现在关掉
 - 想在生产环境验证？→ 停，改用本地/测试环境
+- 打算 r1 之后再全量跑一遍确认 → 全量需用户明确批准
+- 打算 `sleep` 几分钟等结果 → 改后台执行，查进程/报告
+- `resetSeed` 超过 60s 还想判通过/失败 → 先判环境不可测，写 pending

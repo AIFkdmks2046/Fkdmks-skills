@@ -36,10 +36,11 @@ slug：{{SLUG}}
 核心约束：
 - 你是 supervisor，不是执行者。不要修改代码、不要 commit、不要跑测试、不要执行任何 stage。
 - 只允许：读文件、调用 Qoder 会话工具、调用 qa-lease / watchdog-preflight / qa-state、append 日志、写 pending。
-- 不要用 updatedAt 判断会话是否在跑；会话是否活着看 runtimeState，租约心跳看 executor.heartbeat_at。
+- 不要用 updatedAt 判断会话是否在跑；会话是否活着看 runtimeState，租约心跳看 `.qoder/qa/.active-lease/owner.json` 的 `heartbeat_at`（不是状态文件的 `executor.heartbeat_at`）。
 - 不要在目标会话 running 时发送“继续”消息。
 - 不要使用 active_lock 或“另一功能 2 小时锁”的旧规则。
-- 状态文件 watchdog_protocol 必须是 2；不是就写 pending 并退出。
+- 状态文件 `watchdog_protocol` 必须是 2；不是就写 pending 并退出。
+- `awaiting_user=review_blocked` 表示用例审查不收敛、等用户裁决；预检会 PENDING，不要唤醒、不要重跑审查。
 - 看护的启停只能由用户决定。执行者（人工会话/子 Agent）禁止 enable/disable/remove 看护；唯一例外是本 supervisor 按下面的 3-strike 规则自动 disable。
 
 执行步骤：
@@ -102,7 +103,7 @@ slug：{{SLUG}}
      - node {{SKILL_DIR}}/scripts/qa-lease.mjs acquire --slug {{SLUG}} --kind watchdog --session watchdog-<runId> --run-id <runId> --ttl 300；退出码 2 -> 记日志结束；
      - 再查一次 target 状态；若 running / needs_attention -> release，记日志，结束；
      - 目标 run_id = executor.run_id（预检保证非空；为空说明状态未 bind，预检会 PENDING，不会走到这里）；
-     - node {{SKILL_DIR}}/scripts/qa-lease.mjs handoff --slug {{SLUG}} --from-session watchdog-<runId> --from-run-id <runId> --to-session <target> --to-run-id <目标 run_id> --to-kind manual --ttl 900；
+     - node {{SKILL_DIR}}/scripts/qa-lease.mjs handoff --slug {{SLUG}} --from-session watchdog-<runId> --from-run-id <runId> --to-session <target> --to-run-id <目标 run_id> --to-kind manual --ttl 3600；
      - 用 send_message_to_chat_session(target, prompt) 发送，prompt 必须包含：
        “继续 madmax-dev-qa 工作流。先读 {{STATE_PATH}} 和 progress。当前 stage=<...>，current_task=<...>，current_step=<...>，completed_tasks=<...>。不要重做已完成任务。用 session_id=<target> / run_id=<目标 run_id> 运行 qa-lease renew --slug {{SLUG}} 续租（租约已交接；若返回 2 等 5 秒重试，最多 3 次）；每完成一个 Step 更新 progress/state；遇关口停下等用户。若用户已经继续，忽略本消息。”
      - wait_chat_sessions([target], timeoutMs=20000) 确认它变成 running；
@@ -113,7 +114,7 @@ slug：{{SLUG}}
      - 生成 runId=watchdog-<YYYYMMDD-HHmmss> 和新执行者的 runId=<runId>-exec；
      - acquire 租约（watchdog）；
      - 用 create_chat_session 新建执行者会话（不要在本 supervisor 会话里执行）；
-     - handoff 租约给新会话（--to-session <新会话 ID> --to-run-id <新 runId> --to-kind manual --ttl 900）；
+     - handoff 租约给新会话（--to-session <新会话 ID> --to-run-id <新 runId> --to-kind manual --ttl 3600）；
      - node {{SKILL_DIR}}/scripts/qa-state.mjs bind --state {{STATE_PATH}} --session <新会话 ID> --run-id <新 runId>，把 executor 写回状态文件；
      - 发送自包含 prompt：读 {{SKILL_DIR}}/SKILL.md、{{STATE_PATH}}、plan.md、progress；从 current_task/step 继续；不要重做 completed_tasks；先续租；每 Step 更新 progress/state；关口停下；
      - 记日志，结束。

@@ -258,11 +258,26 @@ export function parseIssues(file) {
 
 function readVerdict(file) {
   const head = fs.readFileSync(file, "utf8").slice(0, 4000);
-  const explicit = head.match(/(?:^|\n)\s*(?:结论|verdict|result)\s*[:：]?\s*(PASS|FAIL|通过|不通过)/i);
+  const normalized = head.replace(/^#{1,6}\s*/gm, "").replace(/\*\*/g, "");
+  const explicit = normalized.match(
+    /(?:^|\n)\s*(?:结论|verdict|result)\s*[:：]?\s*(PASS|FAIL|通过|不通过)/i,
+  );
   if (explicit) return /FAIL|不通过/i.test(explicit[1]) ? "fail" : "pass";
   const bold = head.match(/\*\*(FAIL|PASS)\*\*/i);
   if (bold) return bold[1].toUpperCase() === "FAIL" ? "fail" : "pass";
   return "unknown";
+}
+
+function reviewWaiver(state) {
+  const skipped = Array.isArray(state.gates_skipped)
+    ? state.gates_skipped.map(String)
+    : state.gates_skipped
+      ? [String(state.gates_skipped)]
+      : [];
+  const gates = state.gates && typeof state.gates === "object" ? state.gates : {};
+  const note = typeof gates.testcase_review === "string" ? gates.testcase_review : "";
+  if (!skipped.includes("testcase_review") || !/豁免|waiver/i.test(note)) return null;
+  return note;
 }
 
 function failedCaseIds(reportFile) {
@@ -354,12 +369,76 @@ export function checkState(statePath, options = {}) {
     add(errors, "stage_artifact_missing", `当前阶段缺少产物：${missingRequired.join(", ")}`, true);
   }
 
-  if (rank !== undefined && rank > STAGE_RANK.get("5-testcase-review")) {
-    const reviewFile = latestByRound(stateDir, "test-review");
-    if (reviewFile) {
-      const verdict = readVerdict(reviewFile);
+  const reviewFile = latestByRound(stateDir, "test-review");
+  if (reviewFile) {
+    const verdict = readVerdict(reviewFile);
+    const reviewRound = Number(state.review_round ?? NaN);
+    const openBlocks =
+      state.review_open_blocks === undefined ? null : Number(state.review_open_blocks);
+    const prevOpenBlocks =
+      state.review_prev_open_blocks === undefined ? null : Number(state.review_prev_open_blocks);
+    const waiver = reviewWaiver(state);
+    const inReview = rank !== undefined && rank >= STAGE_RANK.get("5-testcase-review");
+
+    if (inReview) {
+      if (Number.isFinite(reviewRound) && reviewRound > 5) {
+        add(
+          waiver ? warnings : errors,
+          waiver ? "review_round_exceeded_waived" : "review_round_exceeded",
+          `用例审查已达 r${reviewRound}，超过 5 轮硬上限${waiver ? "（已签字豁免）" : "；停止推进并写裁决包"}`,
+          !waiver,
+        );
+      }
+      if (Number.isFinite(reviewRound) && reviewRound >= 2) {
+        if (!Number.isFinite(openBlocks) || !Number.isFinite(prevOpenBlocks)) {
+          add(
+            warnings,
+            "review_metrics_missing",
+            "缺少 review_open_blocks / review_prev_open_blocks，无法判断审查是否收敛",
+            false,
+          );
+        } else if (openBlocks >= prevOpenBlocks) {
+          add(
+            waiver ? warnings : errors,
+            waiver ? "review_not_converging_waived" : "review_not_converging",
+            `用例审查未收敛：本轮 open BLOCK=${openBlocks}，上轮=${prevOpenBlocks}（必须严格下降）`,
+            !waiver,
+          );
+        }
+      }
+      if (state.review_baseline) {
+        const baseline = path.resolve(stateDir, String(state.review_baseline));
+        if (!fs.existsSync(baseline)) {
+          add(
+            errors,
+            "review_baseline_missing",
+            `review_baseline 指向的文件不存在：${state.review_baseline}`,
+            true,
+          );
+        }
+      }
+      const roundMatch = path.basename(reviewFile).match(/-r(\d+)\.md$/);
+      const fileRound = roundMatch ? Number(roundMatch[1]) : null;
+      if (Number.isFinite(reviewRound) && fileRound !== null && reviewRound !== fileRound) {
+        add(
+          warnings,
+          "review_round_mismatch",
+          `状态文件 review_round=${reviewRound}，最新审查报告是 r${fileRound}`,
+          false,
+        );
+      }
+      if (verdict === "fail" && Number.isFinite(openBlocks) && openBlocks === 0) {
+        add(warnings, "review_state_mismatch", "最新审查报告判 FAIL，但 review_open_blocks=0", false);
+      }
+    }
+
+    if (rank !== undefined && rank > STAGE_RANK.get("5-testcase-review")) {
       if (verdict === "fail") {
-        add(errors, "test_review_failed", `最新用例审查判 FAIL：${path.basename(reviewFile)}`, true);
+        if (waiver) {
+          add(warnings, "test_review_waived", `用例审查 FAIL 已由用户签字豁免：${waiver}`, false);
+        } else {
+          add(errors, "test_review_failed", `最新用例审查判 FAIL：${path.basename(reviewFile)}`, true);
+        }
       } else if (verdict === "unknown") {
         add(warnings, "test_review_unknown", `无法判定用例审查结论：${path.basename(reviewFile)}`, false);
       }

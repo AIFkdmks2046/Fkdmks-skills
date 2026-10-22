@@ -5,14 +5,28 @@ import process from "node:process";
 
 const PROTOCOL = 2;
 const DEFAULT_TTL = 900;
+const STAGE_TTL = new Map([
+  ["3.5-code-review", 1800],
+  ["5-testcase-review", 1800],
+  ["6-e2e", 7200],
+  ["7-fix", 3600],
+  ["7.5-final-review", 1800],
+  ["8.5-wrapup", 1800],
+]);
+
+function ttlForStage(stage) {
+  return STAGE_TTL.get(String(stage ?? "")) ?? DEFAULT_TTL;
+}
 
 function usage() {
   console.error(`Usage:
   qa-lease.mjs status  [--root <projectRoot>] [--now <iso>] [--json]
-  qa-lease.mjs acquire --slug <slug> --kind manual|watchdog --session <id> --run-id <id> [--ttl 900] [--stage <stage>] [--task <n>] [--step <n>] [--root <root>]
-  qa-lease.mjs renew   --slug <slug> --session <id> --run-id <id> [--ttl 900] [--stage <stage>] [--task <n>] [--step <n>] [--root <root>]
+  qa-lease.mjs acquire --slug <slug> --kind manual|watchdog --session <id> --run-id <id> [--ttl <seconds>] [--stage <stage>] [--task <n>] [--step <n>] [--root <root>]
+  qa-lease.mjs renew   --slug <slug> --session <id> --run-id <id> [--ttl <seconds>] [--stage <stage>] [--task <n>] [--step <n>] [--root <root>]
   qa-lease.mjs release --slug <slug> --session <id> --run-id <id> [--root <root>]
-  qa-lease.mjs handoff --slug <slug> --from-session <id> --from-run-id <id> --to-session <id> --to-kind manual|watchdog [--to-run-id <id>] [--ttl 900] [--root <root>]`);
+  qa-lease.mjs handoff --slug <slug> --from-session <id> --from-run-id <id> --to-session <id> --to-kind manual|watchdog [--to-run-id <id>] [--ttl <seconds>] [--root <root>]
+
+未给 --ttl 时按 stage 取默认：6-e2e 7200、7-fix 3600、3.5/5/7.5/8.5 1800，其余 900。`);
 }
 
 function parseArgs(argv) {
@@ -162,7 +176,7 @@ if (command === "acquire") {
   validateKind(kind);
   const session = requireFlag(flags, "session");
   const runId = requireFlag(flags, "run-id");
-  const ttl = optionalNumber(flags, "ttl") ?? DEFAULT_TTL;
+  const ttl = optionalNumber(flags, "ttl") ?? ttlForStage(flags.stage);
   if (ttl <= 0) fail("--ttl must be > 0");
 
   fs.mkdirSync(path.dirname(dir), { recursive: true });
@@ -240,6 +254,8 @@ if (command === "renew") {
     const ttl = optionalNumber(flags, "ttl");
     if (ttl <= 0) fail("--ttl must be > 0");
     owner.ttl_seconds = ttl;
+  } else if (flags.stage !== undefined) {
+    owner.ttl_seconds = ttlForStage(flags.stage);
   }
   if (flags.stage !== undefined) owner.stage = String(flags.stage);
   if (flags.task !== undefined) owner.task = optionalNumber(flags, "task");
@@ -278,7 +294,7 @@ if (command === "handoff") {
   if (!sameOwner(owner, fromSession, fromRunId)) {
     fail("handoff source does not own the lease", 2, { lease_dir: dir, owner });
   }
-  const ttl = optionalNumber(flags, "ttl") ?? DEFAULT_TTL;
+  const ttl = optionalNumber(flags, "ttl") ?? ttlForStage(owner.stage);
   if (ttl <= 0) fail("--ttl must be > 0");
   owner.owner_kind = toKind;
   owner.session_id = toSession;

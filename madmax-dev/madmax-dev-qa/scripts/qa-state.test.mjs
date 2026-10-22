@@ -372,3 +372,146 @@ test("doctor reports issues count mismatch", () => {
   assert.equal(result.status, 1);
   assert.ok(result.output.errors.some((item) => item.code === "issues_count_mismatch"));
 });
+
+function seedReviewArtifacts(project, { round = 2, verdict = "PASS" } = {}) {
+  for (const file of ["code-review.md", "test-cases.md", "test-report-r1.md"]) {
+    fs.writeFileSync(path.join(project.dir, file), `# ${file}\n`);
+  }
+  fs.writeFileSync(
+    path.join(project.dir, `test-review-r${round}.md`),
+    `# 测试用例审查报告 r${round}\n\n## 结论\n${verdict}\n`,
+  );
+  if (round > 1) {
+    fs.writeFileSync(
+      path.join(project.dir, "test-review-r1.md"),
+      "# 测试用例审查报告 r1\n\n## 结论\nFAIL\n",
+    );
+  }
+}
+
+function setReviewState(project, values, extraLines = []) {
+  let text = fs.readFileSync(project.state, "utf8");
+  for (const [key, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^${key}:.*$`, "m");
+    if (pattern.test(text)) text = text.replace(pattern, `${key}: ${value}`);
+    else text = text.replace(/^---\r?\n/, (matched) => `${matched}${key}: ${value}\n`);
+  }
+  if (extraLines.length) {
+    const end = text.indexOf("\n---", 4);
+    text = `${text.slice(0, end)}\n${extraLines.join("\n")}${text.slice(end)}`;
+  }
+  fs.writeFileSync(project.state, text);
+}
+
+test("doctor accepts a converged review", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 2, verdict: "PASS" });
+  setReviewState(project, {
+    stage: "6-e2e",
+    review_round: 2,
+    review_baseline: "test-review-r1.md",
+    review_open_blocks: 0,
+    review_prev_open_blocks: 2,
+  });
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 0, JSON.stringify(result.output, null, 2));
+});
+
+test("doctor flags a non-converging review", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 3, verdict: "FAIL" });
+  setReviewState(project, {
+    stage: "5-testcase-review",
+    review_round: 3,
+    review_baseline: "test-review-r1.md",
+    review_open_blocks: 2,
+    review_prev_open_blocks: 2,
+  });
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 1);
+  const codes = result.output.errors.map((item) => item.code);
+  assert.ok(codes.includes("review_not_converging"), JSON.stringify(result.output, null, 2));
+});
+
+test("doctor flags the review round ceiling", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 6, verdict: "FAIL" });
+  setReviewState(project, {
+    stage: "5-testcase-review",
+    review_round: 6,
+    review_baseline: "test-review-r1.md",
+    review_open_blocks: 1,
+    review_prev_open_blocks: 2,
+  });
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 1);
+  assert.ok(result.output.errors.some((item) => item.code === "review_round_exceeded"));
+});
+
+test("doctor downgrades review failures when the user signed a waiver", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 3, verdict: "FAIL" });
+  setReviewState(
+    project,
+    {
+      stage: "6-e2e",
+      review_round: 3,
+      review_baseline: "test-review-r1.md",
+      review_open_blocks: 2,
+      review_prev_open_blocks: 2,
+    },
+    [
+      "gates_skipped: [testcase_review]",
+      "gates:",
+      '  testcase_review: "用户签字豁免：剩余 BLOCK 不影响主流程"',
+    ],
+  );
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 0, JSON.stringify(result.output, null, 2));
+  const codes = result.output.warnings.map((item) => item.code);
+  assert.ok(codes.includes("test_review_waived"));
+  assert.ok(codes.includes("review_not_converging_waived"));
+});
+
+test("doctor warns when review_round does not match the latest report", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 2, verdict: "PASS" });
+  setReviewState(project, {
+    stage: "6-e2e",
+    review_round: 1,
+    review_baseline: "test-review-r1.md",
+    review_open_blocks: 0,
+    review_prev_open_blocks: 0,
+  });
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 0, JSON.stringify(result.output, null, 2));
+  assert.ok(result.output.warnings.some((item) => item.code === "review_round_mismatch"));
+});
+
+test("doctor flags a missing review baseline", () => {
+  const project = makeProject();
+  writeLease(project.root, "s1", "r1");
+  run("migrate", ["--state", project.state, "--session", "s1", "--run-id", "r1"]);
+  seedReviewArtifacts(project, { round: 2, verdict: "PASS" });
+  fs.rmSync(path.join(project.dir, "test-review-r1.md"));
+  setReviewState(project, {
+    stage: "6-e2e",
+    review_round: 2,
+    review_baseline: "test-review-r1.md",
+    review_open_blocks: 0,
+    review_prev_open_blocks: 1,
+  });
+  const result = run("doctor", ["--state", project.state]);
+  assert.equal(result.status, 1);
+  assert.ok(result.output.errors.some((item) => item.code === "review_baseline_missing"));
+});
